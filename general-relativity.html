@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js General Relativity Demo</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let planeMesh, centralSphere, orbitingSphere;
+        let planeGeometry; // Keep reference to geometry for vertex manipulation
+        const clock = new THREE.Clock();
+
+        // --- Configuration ---
+        const PLANE_SIZE = 200;
+        const PLANE_SEGMENTS = 80; // Higher density grid
+        const CENTRAL_SPHERE_RADIUS = 5;
+        const ORBITING_SPHERE_RADIUS = 1;
+        const ORBIT_RADIUS = 35;
+        const ORBIT_SPEED = 0.3;
+        const GRAVITY_STRENGTH_CENTRAL = 100; // Controls depth of central well
+        const GRAVITY_STRENGTH_ORBITING = 15;  // Controls depth of orbiting well
+        const GRAVITY_FALLOFF = 1.5; // How quickly gravity diminishes (higher = faster)
+
+        init();
+        animate();
+
+        function init() {
+            // --- Scene ---
+            scene = new THREE.Scene();
+
+            // --- Camera ---
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 50, 70); // Positioned above and looking slightly down
+            camera.lookAt(0, 0, 0);
+
+            // --- Renderer ---
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // --- Controls ---
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // Smoother camera movement
+            controls.dampingFactor = 0.05;
+
+            // --- Lights (Optional but good practice) ---
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.2);
+            scene.add(ambientLight);
+            const pointLight = new THREE.PointLight(0xffffff, 0.8);
+            pointLight.position.set(0, 30, 0);
+            scene.add(pointLight);
+
+            // --- Spacetime Grid (Plane) ---
+            planeGeometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, PLANE_SEGMENTS, PLANE_SEGMENTS);
+            const planeMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ff00, // Green
+                wireframe: true
+            });
+            planeMesh = new THREE.Mesh(planeGeometry, planeMaterial);
+            planeMesh.rotation.x = -Math.PI / 2; // Rotate to be horizontal
+            scene.add(planeMesh);
+
+            // --- Central Mass (Star) ---
+            const centralSphereGeometry = new THREE.SphereGeometry(CENTRAL_SPHERE_RADIUS, 32, 32);
+            const centralSphereMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffff00,          // Yellow
+                emissive: 0xffff00,       // Make it glow yellow
+                emissiveIntensity: 1.0
+            });
+            centralSphere = new THREE.Mesh(centralSphereGeometry, centralSphereMaterial);
+            centralSphere.position.y = 0; // Place slightly above the plane origin initially
+            scene.add(centralSphere);
+
+            // --- Orbiting Body (Planet) ---
+            const orbitingSphereGeometry = new THREE.SphereGeometry(ORBITING_SPHERE_RADIUS, 16, 16);
+            const orbitingSphereMaterial = new THREE.MeshBasicMaterial({
+                color: 0x0000ff // Blue
+            });
+            orbitingSphere = new THREE.Mesh(orbitingSphereGeometry, orbitingSphereMaterial);
+            // Initial position set in animate loop
+            scene.add(orbitingSphere);
+
+
+            // --- Handle Window Resize ---
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function deformPlane() {
+            const centralPos = centralSphere.position;
+            const orbitingPos = orbitingSphere.position;
+            const positions = planeGeometry.attributes.position;
+            const vertex = new THREE.Vector3(); // To avoid creating vectors in the loop
+
+            for (let i = 0; i < positions.count; i++) {
+                vertex.fromBufferAttribute(positions, i);
+
+                // We work in the plane's local coordinate system (before rotation)
+                const localX = vertex.x;
+                const localZ = vertex.y; // In PlaneGeometry, y corresponds to depth before rotation
+
+                // Calculate distance squared from central sphere (projected onto the plane)
+                const dxCentral = localX - centralPos.x;
+                const dzCentral = localZ - centralPos.z; // Use centralPos.z
+                const distSqCentral = dxCentral * dxCentral + dzCentral * dzCentral;
+
+                // Calculate distance squared from orbiting sphere (projected onto the plane)
+                const dxOrbiting = localX - orbitingPos.x;
+                // Compare the vertex's world Z coordinate (-localZ) with the sphere's world Z coordinate (orbitingPos.z)
+                const dzOrbiting_world_diff = -localZ - orbitingPos.z;
+                const distSqOrbiting = dxOrbiting * dxOrbiting + dzOrbiting_world_diff * dzOrbiting_world_diff; // Use the squared world Z difference
+
+                // Calculate displacement based on inverse distance (gravity well)
+                // Add a small epsilon (e.g., 1.0) to avoid division by zero / extreme values at center
+                const displacementCentral = -GRAVITY_STRENGTH_CENTRAL / (Math.pow(distSqCentral, GRAVITY_FALLOFF / 2) + 1.0);
+                const displacementOrbiting = -GRAVITY_STRENGTH_ORBITING / (Math.pow(distSqOrbiting, GRAVITY_FALLOFF / 2) + 1.0);
+
+                // Total displacement is the sum of influences
+                const totalDisplacement = displacementCentral + displacementOrbiting;
+
+                // Apply displacement to the Z-coordinate (which becomes Y after rotation)
+                positions.setZ(i, totalDisplacement);
+            }
+
+            // Crucial: Notify Three.js that the vertices have changed
+            positions.needsUpdate = true;
+            planeGeometry.computeVertexNormals(); // Optional: Recalculate normals if using lighting that depends on them
+        }
+
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsedTime = clock.getElapsedTime();
+
+            // --- Update Orbiting Sphere Position ---
+            orbitingSphere.position.x = Math.cos(elapsedTime * ORBIT_SPEED) * ORBIT_RADIUS;
+            orbitingSphere.position.z = Math.sin(elapsedTime * ORBIT_SPEED) * ORBIT_RADIUS;
+            // Optionally lift it slightly based on the deformation it would experience
+            // For simplicity, keep y=0 or slightly above
+            orbitingSphere.position.y = ORBITING_SPHERE_RADIUS * 0.5;
+
+
+            // --- Deform the Plane Grid ---
+            deformPlane();
+
+            // --- Update Controls ---
+            controls.update();
+
+            // --- Render Scene ---
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+    </script>
+
+</body>
+
+</html>

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Dipole Electromagnetism Demo</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: sans-serif; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            display:block;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        Electromagnetism Demo: Magnetic Dipole (Solenoid Approximation)<br/>
+        Current flows through the coil, generating a dipole-like magnetic field (blue particles).<br/>
+        Use mouse/touch to orbit, zoom, and pan.
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        let scene, camera, renderer, controls, composer;
+        let solenoidMesh, fieldPoints;
+        const clock = new THREE.Clock();
+
+        // --- Configuration ---
+        const coilRadius = 1.5;
+        const coilHeight = 5;
+        const coilTurns = 8;
+        const coilWireRadius = 0.1;
+        const numFieldParticles = 2500; // Increased for better visualization
+        const fieldAnimationSpeed = 4.0; // Speed particles move along field lines
+        const particleSize = 0.1;
+        const dipoleMomentStrength = 15.0; // Arbitrary strength factor for visualization
+        const resetDistance = coilHeight * 2.5; // How far particles go before resetting
+        const resetNearPoleDistance = 0.2; // Min distance from origin to avoid singularity / reset
+        const poleZ = coilHeight / 2; // Z-coordinate of the solenoid ends (poles)
+
+        // --- Custom Helix Curve ---
+        class HelixCurve extends THREE.Curve {
+            constructor(radius = 1, height = 5, turns = 5) {
+                super();
+                this.radius = radius;
+                this.height = height;
+                this.turns = turns;
+            }
+
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                const angle = 2 * Math.PI * this.turns * t;
+                const z = (t - 0.5) * this.height; // Center around origin
+                const x = this.radius * Math.cos(angle);
+                const y = this.radius * Math.sin(angle);
+                return optionalTarget.set(x, y, z);
+            }
+        }
+
+        // --- Texture Generation ---
+        function createChargeTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 4; // Thin texture
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#000000'; // Background (or transparent)
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#FFFF00'; // Bright yellow for charge
+            const dashLength = 30;
+            const gapLength = 30;
+            for (let i = 0; i < canvas.width; i += (dashLength + gapLength)) {
+                ctx.fillRect(i, 0, dashLength, canvas.height);
+            }
+
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function createParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(200, 220, 255, 1)');   // Brighter center
+            gradient.addColorStop(0.3, 'rgba(150, 180, 255, 0.7)'); // Mid color
+            gradient.addColorStop(1, 'rgba(100, 120, 200, 0)');   // Fade out
+
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 64, 64);
+
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // --- Magnetic Dipole Field Calculation ---
+        const dipoleMoment = new THREE.Vector3(0, 0, dipoleMomentStrength); // Along +Z axis
+        const tempVec3 = new THREE.Vector3(); // Reusable vector for calculations
+
+        /**
+         * Calculates the magnetic field vector B at a given position for a dipole at the origin.
+         * Formula: B(r) = (mu0 / 4pi) * [ (3 * (m . r) * r / |r|^5) - (m / |r|^3) ]
+         * We ignore the constant factor (mu0 / 4pi) as we only need the direction.
+         * @param {THREE.Vector3} position - The point in space (relative to dipole origin).
+         * @param {THREE.Vector3} m - The magnetic dipole moment vector.
+         * @param {THREE.Vector3} target - The vector to store the result in.
+         * @returns {THREE.Vector3} The magnetic field vector (direction and relative strength).
+         */
+        function magneticDipoleField(position, m, target) {
+            const rMagSq = position.lengthSq();
+            if (rMagSq < 1e-6) { // Avoid division by zero at the exact origin
+                return target.set(0, 0, 0); // Or return a default direction like Z?
+            }
+            const rMag = Math.sqrt(rMagSq);
+            const rMag3 = rMagSq * rMag;
+            const rMag5 = rMag3 * rMagSq;
+
+            // Calculate m . r (dot product)
+            const mDotR = m.dot(position);
+
+            // Calculate first term: (3 * (m . r) * r / |r|^5)
+            target.copy(position).multiplyScalar(3 * mDotR / rMag5);
+
+            // Calculate second term: (m / |r|^3)
+            tempVec3.copy(m).divideScalar(rMag3);
+
+            // Subtract second term from first term
+            target.sub(tempVec3);
+
+            return target;
+        }
+
+
+        // --- Initialization ---
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(6, 5, 7); // Adjusted starting view
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 2;
+            controls.maxDistance = 30; // Increased max distance
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 10, 7.5);
+            scene.add(directionalLight);
+
+            // --- Solenoid ---
+            const helixPath = new HelixCurve(coilRadius, coilHeight, coilTurns);
+            const solenoidGeometry = new THREE.TubeGeometry(helixPath, 200, coilWireRadius, 12, false);
+
+            const chargeTexture = createChargeTexture();
+            chargeTexture.wrapS = THREE.RepeatWrapping;
+            chargeTexture.repeat.set(coilTurns * 1.5, 1);
+
+            const solenoidMaterial = new THREE.MeshStandardMaterial({
+                color: 0xb87333, // Copper color
+                metalness: 0.8,
+                roughness: 0.3,
+                emissive: 0x442200, // Base warm glow
+                emissiveMap: chargeTexture,
+                emissiveIntensity: 1.5
+            });
+            solenoidMesh = new THREE.Mesh(solenoidGeometry, solenoidMaterial);
+            scene.add(solenoidMesh);
+
+            // --- Magnetic Field Particles ---
+            const particleTexture = createParticleTexture();
+            const fieldMaterial = new THREE.PointsMaterial({
+                color: 0xaaaaff,
+                size: particleSize,
+                map: particleTexture,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.7,
+                sizeAttenuation: true
+            });
+
+            const fieldGeometry = new THREE.BufferGeometry();
+            const positions = [];
+
+            // Generate particles randomly within a spherical region around the solenoid
+            const spawnRadius = resetDistance * 0.8; // Start within the reset boundary
+            for (let i = 0; i < numFieldParticles; i++) {
+                 // Spherical distribution (more uniform density than box)
+                const r = Math.cbrt(Math.random()) * spawnRadius; // cube root for uniform volume distribution
+                const theta = Math.random() * Math.PI * 2; // Azimuthal angle
+                const phi = Math.acos(2 * Math.random() - 1); // Polar angle (cos distribution)
+
+                const x = r * Math.sin(phi) * Math.cos(theta);
+                const y = r * Math.sin(phi) * Math.sin(theta);
+                const z = r * Math.cos(phi);
+
+                positions.push(x, y, z);
+            }
+
+            fieldGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+            fieldPoints = new THREE.Points(fieldGeometry, fieldMaterial);
+            scene.add(fieldPoints);
+
+
+            // --- Post-processing (Bloom) ---
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.0, 0.5, 0.2);
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            // Resize listener
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // --- Reset Particle ---
+        function resetParticle(index, positions) {
+            const i3 = index * 3;
+
+            // Reset near the "South" pole (bottom end of solenoid, -Z)
+            // So particles flow out the "North" (+Z) and loop back to "South" (-Z)
+            const angle = Math.random() * Math.PI * 2;
+            const radius = Math.random() * coilRadius * 0.5; // Start close to the axis inside the coil end
+            const startZ = -poleZ - Math.random() * 0.5; // Slightly below the pole
+
+            positions[i3 + 0] = radius * Math.cos(angle);
+            positions[i3 + 1] = radius * Math.sin(angle);
+            positions[i3 + 2] = startZ;
+
+           /* // Or: Random reset within a volume if preferred
+             const r = Math.cbrt(Math.random()) * resetDistance * 0.8;
+             const theta = Math.random() * Math.PI * 2;
+             const phi = Math.acos(2 * Math.random() - 1);
+             positions[i3 + 0] = r * Math.sin(phi) * Math.cos(theta);
+             positions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+             positions[i3 + 2] = r * Math.cos(phi);
+           */
+        }
+
+
+        // --- Animation Logic ---
+        // --- Animation Logic ---
+        const currentPos = new THREE.Vector3();
+        const fieldDir = new THREE.Vector3();
+        const displacement = new THREE.Vector3();
+        const insideFieldDirection = new THREE.Vector3(0, 0, 1); // Constant direction inside (+Z)
+
+        function animateField(deltaTime) {
+            if (!fieldPoints) return;
+
+            const positions = fieldPoints.geometry.attributes.position.array;
+            const count = positions.length / 3;
+            const coilRadiusSq = coilRadius * coilRadius; // Pre-calculate square for efficiency
+
+            for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                currentPos.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
+                const radialDistSq = currentPos.x * currentPos.x + currentPos.y * currentPos.y;
+                const currentZ = currentPos.z;
+
+                let useInsideField = false;
+                // Check if particle is within the cylindrical bounds of the solenoid core
+                if (radialDistSq < coilRadiusSq && Math.abs(currentZ) < poleZ) {
+                     useInsideField = true;
+                }
+
+                 // --- Reset Condition Check ---
+                 // Reset if too far radially OR too far along Z axis OR near origin singularity
+                 const totalDistSq = currentPos.lengthSq(); // Use lengthSq for overall distance check
+                 if (totalDistSq > resetDistance * resetDistance ||
+                    totalDistSq < resetNearPoleDistance * resetNearPoleDistance )
+                 {
+                     resetParticle(i, positions);
+                     continue; // Skip update for this frame, start fresh next frame
+                 }
+                 // --- End Reset Condition Check ---
+
+
+                if (useInsideField) {
+                    // --- Inside Solenoid ---
+                    // Field is strong and uniform, pointing along +Z (assuming dipoleMoment is +Z)
+                    // Use a slightly modified speed if desired, or keep it the same
+                    const speedInside = fieldAnimationSpeed; // Or adjust if needed fieldAnimationSpeed * 1.2;
+                    displacement.copy(insideFieldDirection).multiplyScalar(speedInside * deltaTime);
+
+                } else {
+                    // --- Outside Solenoid (or near ends) ---
+                    // Use the dipole approximation
+                    magneticDipoleField(currentPos, dipoleMoment, fieldDir);
+                    const fieldStrengthSq = fieldDir.lengthSq();
+
+                    // Additional check for zero field outside (less likely but possible)
+                     if (fieldStrengthSq < 1e-8) {
+                         resetParticle(i, positions);
+                         continue;
+                     }
+
+                    // Normalize the field direction
+                    fieldDir.divideScalar(Math.sqrt(fieldStrengthSq)); // Normalize
+
+                    // Calculate displacement: direction * speed * time
+                    displacement.copy(fieldDir).multiplyScalar(fieldAnimationSpeed * deltaTime);
+                }
+
+                // Update position
+                positions[i3 + 0] += displacement.x;
+                positions[i3 + 1] += displacement.y;
+                positions[i3 + 2] += displacement.z;
+
+            } // End particle loop
+
+            fieldPoints.geometry.attributes.position.needsUpdate = true;
+        }
+
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+            // Limit delta time to prevent jumps if the tab loses focus
+            const dtClamped = Math.min(deltaTime, 0.05); // Max 50ms step
+
+
+            // Animate charge texture offset
+            if (solenoidMesh && solenoidMesh.material.emissiveMap) {
+                solenoidMesh.material.emissiveMap.offset.x -= dtClamped * 0.6; // Adjust speed here
+                solenoidMesh.material.emissiveMap.offset.x %= 1;
+            }
+
+            // Animate magnetic field particles
+            animateField(dtClamped);
+
+
+            controls.update();
+            composer.render();
+        }
+
+        // --- Event Handlers ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Start ---
+        init();
+        animate();
+
+    </script>
+</body>
+</html>
