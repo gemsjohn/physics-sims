@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Solar System Orbit Simulation with Gravity Spheres</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            display: block;
+            color: #ccc;
+            font-family: monospace;
+        }
+
+        #control-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            background: rgba(40, 40, 40, 0.85);
+            padding: 15px;
+            border-radius: 5px;
+            color: #eee;
+            min-width: 220px;
+        }
+
+        #control-panel h4 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #555;
+            padding-bottom: 5px;
+        }
+
+        #control-panel label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+
+        #control-panel input[type="range"],
+        #control-panel input[type="checkbox"] {
+            width: 100%;
+            margin-bottom: 2px;
+            cursor: pointer;
+            vertical-align: middle;
+        }
+
+        #control-panel input[type="checkbox"] {
+            width: auto;
+            /* Checkboxes shouldn't be full width */
+            margin-right: 5px;
+        }
+
+        #control-panel .value-display {
+            font-size: 0.8em;
+            color: #aaa;
+            margin-left: 5px;
+            display: inline-block;
+            min-width: 25px;
+            text-align: right;
+        }
+
+        #control-panel .control-group {
+            margin-bottom: 15px;
+        }
+
+        #control-panel .checkbox-label {
+            /* Style for checkbox labels */
+            display: inline-block;
+            margin-bottom: 0;
+            vertical-align: middle;
+        }
+
+        hr {
+            border-color: #444;
+            margin: 15px 0;
+            border-style: solid;
+            border-width: 1px 0 0 0;
+        }
+
+        /* Style for planet labels */
+        .label {
+            color: #fff;
+            font-family: sans-serif;
+            font-size: 10px;
+            text-shadow: 1px 1px 2px black;
+            /* Make text more readable */
+            pointer-events: none;
+            /* Prevent labels from blocking mouse events */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="info">Loading assets...</div>
+
+    <div id="control-panel">
+        <h4>Controls</h4>
+        <div class="control-group">
+            <label for="brightness-slider">Sun Wireframe Brightness:<span id="brightness-value"
+                    class="value-display">0.80</span></label>
+            <input type="range" id="brightness-slider" min="0.0" max="5.0" step="0.05" value="0.8">
+        </div>
+        <div class="control-group">
+            <label for="animation-speed-slider">Animation Speed:<span id="animation-speed-value"
+                    class="value-display">1.0</span></label>
+            <input type="range" id="animation-speed-slider" min="0.1" max="10.0" step="0.1" value="1.0">
+        </div>
+        <div class="control-group">
+            <label for="planet-brightness-slider">Planet Brightness:<span id="planet-brightness-value"
+                    class="value-display">0.7</span></label>
+            <input type="range" id="planet-brightness-slider" min="0.0" max="2.0" step="0.05" value="0.7">
+        </div>
+        <hr>
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-orbits-toggle" checked>
+                <span class="checkbox-label">Show Orbits</span>
+            </label>
+        </div>
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-labels-toggle" checked>
+                <span class="checkbox-label">Show Labels</span>
+            </label>
+        </div>
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-gravity-spheres-toggle" checked>
+                <span class="checkbox-label">Show Gravity Spheres</span>
+            </label>
+        </div>
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-earth-mars-line-toggle" checked>
+                <span class="checkbox-label">Show Earth-Mars Line</span>
+            </label>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'; // For labels
+
+        let scene, camera, renderer, labelRenderer, controls, composer, bloomPass;
+        let sunSurfaceMesh, sunWireframeMesh;
+        let planets = []; // Array to hold planet objects
+        let starField; // Variable for the starfield points
+        let clock = new THREE.Clock();
+        let infoDiv = document.getElementById('info');
+
+        // --- Reusable Vectors (Performance) ---
+        const planetWorldPos = new THREE.Vector3();
+        const earthWorldPos = new THREE.Vector3();
+        const marsWorldPos = new THREE.Vector3();
+        // const arrowDirection = new THREE.Vector3(); // No longer needed for arrows
+
+        // --- NEW: Earth-Mars Line Variables ---
+        let earthMarsLine = null;
+        let earthObject = null; // Reference to the Earth planet object
+        let marsObject = null;  // Reference to the Mars planet object
+
+        // --- Constants ---
+        const SUN_RADIUS_SCENE = 3;
+        const EARTH_DISTANCE_KM = 149.6;
+        const EARTH_DIAMETER_KM = 12756;
+        const SCENE_DISTANCE_SCALE = 40 / EARTH_DISTANCE_KM;
+        const SCENE_PLANET_RADIUS_SCALE = 0.5 / (EARTH_DIAMETER_KM / 2);
+        const ORBIT_SEGMENTS = 128;
+        const ANIMATION_TIME_SCALE = 0.05;
+        const STARFIELD_RADIUS = 2500; // Radius for the star sphere
+        const STAR_COUNT = 10000; // Number of stars
+
+        // --- NEW: Gravity Sphere Constants ---
+        const GRAVITY_SPHERE_COLOR = 0xffffff; // White wireframe
+        const GRAVITY_SPHERE_OPACITY = 0.01;   // Low opacity
+        const GRAVITY_SPHERE_BASE_RADIUS = 0.5; // Minimum sphere size (in scene units)
+        const GRAVITY_SPHERE_LOG_SCALE = 2.0; // Factor to scale log(mass) by for radius
+        const GRAVITY_SPHERE_SEGMENTS = 16; // Fewer segments for wireframe is fine
+
+        // --- Simulation Parameters ---
+        let params = {
+            sunBrightness: 0.8,
+            animationSpeed: 1.0,
+            planetBrightness: 0.7,
+            showOrbits: true,
+            showLabels: true,
+            showGravitySpheres: true,
+            showEarthMarsLine: true // <<< ADD THIS LINE
+        };
+
+        // --- Planetary Data (Mass relative to Earth) ---
+        const planetData = [
+            { name: 'Mercury', distance: 57.9, period: 88.0, eccentricity: 0.206, inclination: 7.0, diameter: 4879, color: 0xaaaaaa, mass: 0.055 },
+            { name: 'Venus', distance: 108.2, period: 224.7, eccentricity: 0.007, inclination: 3.4, diameter: 12104, color: 0xffe0b3, mass: 0.815 },
+            { name: 'Earth', distance: 149.6, period: 365.2, eccentricity: 0.017, inclination: 0.0, diameter: 12756, color: 0x6699ff, mass: 1.0 },
+            { name: 'Mars', distance: 228.0, period: 687.0, eccentricity: 0.094, inclination: 1.8, diameter: 6792, color: 0xff7f50, mass: 0.107 },
+            { name: 'Jupiter', distance: 778.5, period: 4331, eccentricity: 0.049, inclination: 1.3, diameter: 142984, color: 0xffd700, mass: 317.8 },
+            { name: 'Saturn', distance: 1432.0, period: 10747, eccentricity: 0.052, inclination: 2.5, diameter: 120536, color: 0xf0e68c, mass: 95.2, hasRings: true },
+            { name: 'Uranus', distance: 2867.0, period: 30589, eccentricity: 0.047, inclination: 0.8, diameter: 51118, color: 0xadd8e6, mass: 14.5 },
+            { name: 'Neptune', distance: 4515.0, period: 59800, eccentricity: 0.010, inclination: 1.8, diameter: 49528, color: 0x4169e1, mass: 17.1 },
+            { name: 'Pluto', distance: 5906.4, period: 90560, eccentricity: 0.244, inclination: 17.2, diameter: 2376, color: 0xcccccc, mass: 0.0022 } // Dwarf Planet
+        ];
+
+
+        // --- Initialization Function ---
+        function init() {
+            infoDiv.textContent = "Initializing scene...";
+            scene = new THREE.Scene();
+
+            // --- Camera Setup ---
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, STARFIELD_RADIUS * 1.5);
+            camera.position.set(0, 100, 180);
+
+            // --- WebGL Renderer ---
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            document.body.appendChild(renderer.domElement);
+
+            // --- CSS2D Renderer for Labels ---
+            labelRenderer = new CSS2DRenderer();
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.domElement.style.position = 'absolute';
+            labelRenderer.domElement.style.top = '0px';
+            labelRenderer.domElement.style.pointerEvents = 'none';
+            document.body.appendChild(labelRenderer.domElement);
+
+            // --- Lighting ---
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+            scene.add(ambientLight);
+
+            // --- Sun ---
+            createSun();
+
+            // --- Planets & Gravity Spheres --- // MODIFIED
+            createPlanetsAndGravitySpheres(); // RENAMED function
+
+            // --- Starfield ---
+            createStarfield(); // Add the starfield
+
+            // --- Controls ---
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 10;
+            controls.maxDistance = STARFIELD_RADIUS * 1.2;
+            controls.target.set(0, 0, 0);
+            camera.lookAt(scene.position);
+
+            // --- Post-processing ---
+            setupPostProcessing(); // Setup bloom AFTER scene objects are created
+
+            // --- UI Controls ---
+            setupCustomControls(sunWireframeMesh.material);
+
+            // --- Event Listeners ---
+            window.addEventListener('resize', onWindowResize, false);
+
+            // --- Start Animation ---
+            infoDiv.textContent = "Scene ready.";
+            setTimeout(() => { infoDiv.style.display = 'none'; }, 3000);
+            animate();
+        }
+
+        // --- Create Sun Object ---
+        function createSun() {
+            const sunGeometry = new THREE.SphereGeometry(SUN_RADIUS_SCENE, 64, 64);
+            const textureLoader = new THREE.TextureLoader();
+            const sunMaterial = new THREE.MeshStandardMaterial({
+                emissive: 0xFFFF00,
+                emissiveIntensity: 1.8,
+                color: 0xFFFF33,
+                roughness: 0.8,
+                metalness: 0.1,
+                map: textureLoader.load(
+                    'https://placehold.co/512x256/ffcc00/000000?text=Sun', // Placeholder texture
+                    () => console.log("Sun texture loaded (placeholder)."),
+                    undefined,
+                    (err) => {
+                        console.error('Error loading sun texture:', err);
+                        infoDiv.textContent = "Error loading Sun texture.";
+                        sunMaterial.map = null;
+                        sunMaterial.needsUpdate = true;
+                    }
+                )
+            });
+            if (sunMaterial.map) {
+                sunMaterial.map.colorSpace = THREE.SRGBColorSpace;
+            }
+            sunSurfaceMesh = new THREE.Mesh(sunGeometry, sunMaterial);
+            scene.add(sunSurfaceMesh);
+
+            // Sun Wireframe
+            const sunWireframeMaterial = new THREE.MeshStandardMaterial({
+                color: 0x000000,
+                emissive: 0xFFFF33,
+                emissiveIntensity: params.sunBrightness,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.7,
+            });
+            sunWireframeMesh = new THREE.Mesh(sunGeometry, sunWireframeMaterial);
+            sunWireframeMesh.scale.set(1.01, 1.01, 1.01);
+            scene.add(sunWireframeMesh);
+        }
+
+        // --- Create Planet Objects AND Gravity Spheres --- // MODIFIED Function Name and Content
+        function createPlanetsAndGravitySpheres() {
+            infoDiv.textContent = "Creating planets and gravity spheres...";
+            const planetGeometry = new THREE.SphereGeometry(1, 32, 32);
+            // --- NEW: Shared geometry/material for gravity spheres ---
+            const gravitySphereGeometry = new THREE.SphereGeometry(1, GRAVITY_SPHERE_SEGMENTS, GRAVITY_SPHERE_SEGMENTS); // Radius is 1, will be scaled
+            const gravitySphereMaterial = new THREE.MeshBasicMaterial({
+                color: GRAVITY_SPHERE_COLOR,
+                wireframe: true,
+                transparent: true,
+                opacity: GRAVITY_SPHERE_OPACITY,
+                depthWrite: false // Prevent wireframe obscuring things behind it
+            });
+
+
+            planetData.forEach(data => {
+                // Scaled Values
+                const radius = Math.max(0.1, (data.diameter / 2) * SCENE_PLANET_RADIUS_SCALE);
+                const semiMajorAxis = data.distance * SCENE_DISTANCE_SCALE;
+                const semiMinorAxis = semiMajorAxis * Math.sqrt(1 - data.eccentricity * data.eccentricity);
+                const inclinationRad = THREE.MathUtils.degToRad(data.inclination);
+                const c = Math.sqrt(semiMajorAxis * semiMajorAxis - semiMinorAxis * semiMinorAxis);
+                const focusOffset = new THREE.Vector3(c, 0, 0);
+
+                // Planet Material (Emissive)
+                const planetMaterial = new THREE.MeshStandardMaterial({
+                    color: 0xffffff,
+                    emissive: data.color,
+                    emissiveIntensity: params.planetBrightness,
+                    roughness: 0.8,
+                    metalness: 0.1,
+                    wireframe: false,
+                });
+
+                // Planet Mesh
+                const planetMesh = new THREE.Mesh(planetGeometry, planetMaterial);
+                planetMesh.scale.set(radius, radius, radius);
+                planetMesh.name = data.name;
+
+                // Planet Label
+                const planetDiv = document.createElement('div');
+                planetDiv.className = 'label';
+                planetDiv.textContent = data.name;
+                const planetLabel = new CSS2DObject(planetDiv);
+                planetLabel.position.set(0, radius * 1.5, 0); // Position relative to planet center
+                planetLabel.layers.set(0);
+                planetLabel.visible = params.showLabels;
+                planetMesh.add(planetLabel); // Add label as child of planet mesh
+
+                // --- Orbit Line (Dashed) ---
+                const orbitPoints = [];
+                for (let i = 0; i <= ORBIT_SEGMENTS; i++) {
+                    const angle = (i / ORBIT_SEGMENTS) * Math.PI * 2;
+                    const x = semiMajorAxis * Math.cos(angle);
+                    const z = semiMinorAxis * Math.sin(angle);
+                    const point = new THREE.Vector3(x, 0, z);
+                    orbitPoints.push(point);
+                }
+                const orbitGeometry = new THREE.BufferGeometry().setFromPoints(orbitPoints);
+                const orbitMaterial = new THREE.LineDashedMaterial({
+                    color: data.color,
+                    transparent: true,
+                    opacity: 0.7,
+                    linewidth: 3, // Note: linewidth > 1 may not work reliably on all platforms
+                    depthWrite: false,
+                    dashSize: 0.5,
+                    gapSize: 1
+                });
+                const orbitLine = new THREE.LineLoop(orbitGeometry, orbitMaterial);
+                orbitLine.computeLineDistances();
+                orbitLine.position.copy(focusOffset);
+                orbitLine.visible = params.showOrbits;
+
+                // Rings (for Saturn)
+                let ringMesh = null;
+                if (data.hasRings) {
+                    const innerRadius = radius * 1.5;
+                    const outerRadius = radius * 2.5;
+                    const ringGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 64);
+                    ringGeometry.rotateX(Math.PI / 2);
+                    const ringMaterial = new THREE.MeshBasicMaterial({
+                        color: 0xaaaaaa,
+                        side: THREE.DoubleSide,
+                        transparent: true,
+                        opacity: 0.5,
+                        depthWrite: false,
+                    });
+                    ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                    // Add rings directly to the planet mesh
+                    planetMesh.add(ringMesh);
+                }
+
+                // Planet Container (for inclination)
+                const planetContainer = new THREE.Group();
+                planetContainer.add(orbitLine);
+
+                // Planet Positioner (for orbital motion around the focus)
+                const planetPositioner = new THREE.Group();
+                planetPositioner.add(planetMesh); // Add planet (and its label/rings) to the positioner
+                planetContainer.add(planetPositioner);
+
+                // Apply Inclination to the whole container
+                planetContainer.rotation.x = inclinationRad;
+
+                scene.add(planetContainer);
+
+                // --- Gravity Sphere ---
+                const sphereRadius = GRAVITY_SPHERE_BASE_RADIUS + Math.log10(data.mass + 1) * GRAVITY_SPHERE_LOG_SCALE;
+                const gravitySphereMesh = new THREE.Mesh(gravitySphereGeometry, gravitySphereMaterial.clone()); // Clone material
+                gravitySphereMesh.scale.set(sphereRadius, sphereRadius, sphereRadius);
+                gravitySphereMesh.visible = params.showGravitySpheres;
+                gravitySphereMesh.name = data.name + " Gravity Sphere";
+                scene.add(gravitySphereMesh); // Add sphere directly to the scene
+
+                // Store Planet Data
+                const planetInfo = {
+                    name: data.name,
+                    mesh: planetMesh,
+                    material: planetMaterial,
+                    label: planetLabel,
+                    orbitLine: orbitLine,
+                    container: planetContainer,
+                    positioner: planetPositioner,
+                    semiMajorAxis: semiMajorAxis,
+                    semiMinorAxis: semiMinorAxis,
+                    eccentricity: data.eccentricity,
+                    period: data.period,
+                    scaledPeriod: data.period * ANIMATION_TIME_SCALE,
+                    inclination: inclinationRad,
+                    focusOffset: focusOffset.clone(),
+                    rings: ringMesh,
+                    gravitySphere: gravitySphereMesh // Store sphere reference
+                };
+                planets.push(planetInfo);
+
+                // --- NEW: Store references to Earth and Mars objects ---
+                if (data.name === 'Earth') {
+                    earthObject = planetInfo;
+                } else if (data.name === 'Mars') {
+                    marsObject = planetInfo;
+                }
+            });
+            infoDiv.textContent = "Planets and spheres created.";
+        }
+
+        // --- Create Starfield Background ---
+        function createStarfield() {
+            infoDiv.textContent = "Creating starfield...";
+            const starVertices = [];
+            for (let i = 0; i < STAR_COUNT; i++) {
+                const theta = Math.random() * 2 * Math.PI;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const x = STARFIELD_RADIUS * Math.sin(phi) * Math.cos(theta);
+                const y = STARFIELD_RADIUS * Math.sin(phi) * Math.sin(theta);
+                const z = STARFIELD_RADIUS * Math.cos(phi);
+                starVertices.push(x, y, z);
+            }
+            const starGeometry = new THREE.BufferGeometry();
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+            const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.8, sizeAttenuation: false });
+            starField = new THREE.Points(starGeometry, starMaterial);
+            scene.add(starField);
+            infoDiv.textContent = "Starfield created.";
+        }
+
+
+        // --- Setup Post-Processing Effects ---
+        function setupPostProcessing() {
+            composer = new EffectComposer(renderer);
+            const renderPass = new RenderPass(scene, camera);
+            composer.addPass(renderPass);
+            bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.5, 0.5);
+            composer.addPass(bloomPass);
+            const outputPass = new OutputPass();
+            composer.addPass(outputPass);
+            infoDiv.textContent = "Bloom effect enabled.";
+        }
+
+        // --- Setup HTML UI Controls ---
+        function setupCustomControls(sunWireframeMat) {
+            const brightnessSlider = document.getElementById('brightness-slider');
+            const brightnessValueSpan = document.getElementById('brightness-value');
+            const animationSpeedSlider = document.getElementById('animation-speed-slider');
+            const animationSpeedValueSpan = document.getElementById('animation-speed-value');
+            const planetBrightnessSlider = document.getElementById('planet-brightness-slider');
+            const planetBrightnessValueSpan = document.getElementById('planet-brightness-value');
+            const showOrbitsToggle = document.getElementById('show-orbits-toggle');
+            const showLabelsToggle = document.getElementById('show-labels-toggle');
+            // --- UI CHANGE ---
+            const showGravitySpheresToggle = document.getElementById('show-gravity-spheres-toggle');
+            const showEarthMarsLineToggle = document.getElementById('show-earth-mars-line-toggle'); // Get the element
+
+            // Initial UI Values
+            brightnessSlider.value = params.sunBrightness;
+            brightnessValueSpan.textContent = parseFloat(params.sunBrightness).toFixed(2);
+            animationSpeedSlider.value = params.animationSpeed;
+            animationSpeedValueSpan.textContent = parseFloat(params.animationSpeed).toFixed(1);
+            planetBrightnessSlider.value = params.planetBrightness;
+            planetBrightnessValueSpan.textContent = parseFloat(params.planetBrightness).toFixed(2);
+            showOrbitsToggle.checked = params.showOrbits;
+            showLabelsToggle.checked = params.showLabels;
+            showGravitySpheresToggle.checked = params.showGravitySpheres; // MODIFIED
+            showEarthMarsLineToggle.checked = params.showEarthMarsLine; // Set initial checkbox state
+
+
+            // Event Listeners
+            brightnessSlider.addEventListener('input', (event) => {
+                const value = parseFloat(event.target.value);
+                sunWireframeMat.emissiveIntensity = value;
+                brightnessValueSpan.textContent = value.toFixed(2);
+                params.sunBrightness = value;
+            });
+
+            animationSpeedSlider.addEventListener('input', (event) => {
+                const value = parseFloat(event.target.value);
+                params.animationSpeed = value;
+                animationSpeedValueSpan.textContent = value.toFixed(1);
+            });
+
+            planetBrightnessSlider.addEventListener('input', (event) => {
+                const value = parseFloat(event.target.value);
+                params.planetBrightness = value;
+                planetBrightnessValueSpan.textContent = value.toFixed(2);
+                planets.forEach(p => {
+                    if (p.material) p.material.emissiveIntensity = value;
+                });
+            });
+
+            showOrbitsToggle.addEventListener('change', (event) => {
+                params.showOrbits = event.target.checked;
+                planets.forEach(p => p.orbitLine.visible = params.showOrbits);
+            });
+
+            showLabelsToggle.addEventListener('change', (event) => {
+                params.showLabels = event.target.checked;
+                planets.forEach(p => p.label.visible = params.showLabels);
+            });
+
+            // --- MODIFIED: Gravity Sphere Toggle Listener ---
+            showGravitySpheresToggle.addEventListener('change', (event) => {
+                params.showGravitySpheres = event.target.checked;
+                planets.forEach(p => p.gravitySphere.visible = params.showGravitySpheres);
+            });
+            // --- NEW: Earth-Mars Line Toggle Listener ---
+     showEarthMarsLineToggle.addEventListener('change', (event) => {
+         params.showEarthMarsLine = event.target.checked;
+         if (earthMarsLine) {
+             earthMarsLine.visible = params.showEarthMarsLine;
+         }
+     });
+        }
+
+        // --- Update Planet Positions, Gravity Visuals, and Earth-Mars Line ---
+        function updatePlanetsAndGravityVisuals(deltaTime) {
+            const time = clock.getElapsedTime() * params.animationSpeed;
+
+            planets.forEach(planet => {
+                const currentScaledPeriod = planet.period * ANIMATION_TIME_SCALE;
+                if (currentScaledPeriod <= 0) return;
+
+                // --- Orbital Mechanics (Kepler's Equation) ---
+                const meanMotion = (2 * Math.PI) / currentScaledPeriod;
+                const meanAnomaly = (meanMotion * time) % (2 * Math.PI);
+                let eccentricAnomaly = meanAnomaly;
+                for (let i = 0; i < 5; i++) { // Iterate to solve Kepler's equation
+                    eccentricAnomaly = meanAnomaly + planet.eccentricity * Math.sin(eccentricAnomaly);
+                }
+                const cosE = Math.cos(eccentricAnomaly);
+                const sinE = Math.sin(eccentricAnomaly);
+
+                // Position in orbital plane relative to ellipse center
+                const x_ellipse_center = planet.semiMajorAxis * cosE;
+                const z_ellipse_center = planet.semiMinorAxis * sinE;
+
+                // Set positioner's position (relative to the inclined container's origin)
+                planet.positioner.position.set(
+                    x_ellipse_center + planet.focusOffset.x, // Offset by focus distance
+                    0,
+                    z_ellipse_center + planet.focusOffset.z
+                );
+
+                // --- Planet Axial Rotation (Simple) ---
+                planet.mesh.rotation.y += deltaTime * 0.5; // Arbitrary rotation speed
+
+                // --- Update Gravity Sphere Position ---
+                if (planet.gravitySphere) {
+                    // 1. Get planet's current world position
+                    planet.mesh.getWorldPosition(planetWorldPos); // Uses the reusable vector
+
+                    // 2. Set sphere's position to match the planet
+                    planet.gravitySphere.position.copy(planetWorldPos);
+                }
+            });
+
+            // --- NEW: Update Earth-Mars Line Positions ---
+            if (earthMarsLine && earthObject && marsObject ) { // Check visibility later
+                 // Get current world positions using the reusable vectors
+                 earthObject.mesh.getWorldPosition(earthWorldPos);
+                 marsObject.mesh.getWorldPosition(marsWorldPos);
+
+                 // Get the position attribute array from the line's geometry
+                 const positions = earthMarsLine.geometry.attributes.position.array;
+
+                 // Update the array values
+                 positions[0] = earthWorldPos.x;
+                 positions[1] = earthWorldPos.y;
+                 positions[2] = earthWorldPos.z;
+                 positions[3] = marsWorldPos.x;
+                 positions[4] = marsWorldPos.y;
+                 positions[5] = marsWorldPos.z;
+
+                 // Mark the attribute as needing update
+                 earthMarsLine.geometry.attributes.position.needsUpdate = true;
+
+                 // --- NEW: Hohmann Launch Window Logic ---
+
+                 // Calculate angles in the XZ plane (approximation of orbital plane)
+                 const earthAngle = Math.atan2(earthWorldPos.z, earthWorldPos.x);
+                 const marsAngle = Math.atan2(marsWorldPos.z, marsWorldPos.x);
+
+                 // Calculate relative angle (Mars angle - Earth angle)
+                 let relativeAngle = marsAngle - earthAngle;
+
+                 // Normalize angle to be between 0 and 2*PI radians
+                 relativeAngle = (relativeAngle + 2 * Math.PI) % (2 * Math.PI);
+
+                 // Define Hohmann transfer window parameters (approximations)
+                 const optimalPhaseAngle = THREE.MathUtils.degToRad(44); // Approx 44 degrees
+                 const windowHalfWidth = THREE.MathUtils.degToRad(20); // Allow +/- 20 degrees window
+
+                 const launchWindowStart = (optimalPhaseAngle - windowHalfWidth + 2 * Math.PI) % (2 * Math.PI);
+                 const launchWindowEnd = (optimalPhaseAngle + windowHalfWidth + 2 * Math.PI) % (2 * Math.PI);
+
+                 let isWindowOpen = false;
+                 // Handle angle wrapping correctly (e.g., if window crosses 0 radians)
+                 if (launchWindowStart < launchWindowEnd) {
+                     // Normal case: window doesn't cross 0
+                     isWindowOpen = relativeAngle >= launchWindowStart && relativeAngle <= launchWindowEnd;
+                 } else {
+                     // Wrap around case: window crosses 0 (e.g., start=350deg, end=30deg)
+                     isWindowOpen = relativeAngle >= launchWindowStart || relativeAngle <= launchWindowEnd;
+                 }
+
+
+                 // Set line color based on window state
+                 if (isWindowOpen) {
+                     earthMarsLine.material.color.setHex(0x00ff00); // Green
+                 } else {
+                     earthMarsLine.material.color.setHex(0xff0000); // Red
+                 }
+
+                 // --- End of Launch Window Logic ---
+
+                // Apply user visibility toggle AFTER calculating color
+                earthMarsLine.visible = params.showEarthMarsLine; // Assuming you added this param back
+
+             } // End if earthMarsLine exists
+        } // End update function
+
+
+        // --- Update Planet Positions AND Gravity Visuals in Animation Loop --- // RENAMED
+        // function updatePlanetsAndGravityVisuals(deltaTime) {
+        //     const time = clock.getElapsedTime() * params.animationSpeed;
+
+        //     planets.forEach(planet => {
+        //         const currentScaledPeriod = planet.period * ANIMATION_TIME_SCALE;
+        //         if (currentScaledPeriod <= 0) return;
+
+        //         // --- Orbital Mechanics (Kepler's Equation) ---
+        //         const meanMotion = (2 * Math.PI) / currentScaledPeriod;
+        //         const meanAnomaly = (meanMotion * time) % (2 * Math.PI);
+        //         let eccentricAnomaly = meanAnomaly;
+        //         for (let i = 0; i < 5; i++) { // Iterate to solve Kepler's equation
+        //             eccentricAnomaly = meanAnomaly + planet.eccentricity * Math.sin(eccentricAnomaly);
+        //         }
+        //         const cosE = Math.cos(eccentricAnomaly);
+        //         const sinE = Math.sin(eccentricAnomaly);
+
+        //         // Position in orbital plane relative to ellipse center
+        //         const x_ellipse_center = planet.semiMajorAxis * cosE;
+        //         const z_ellipse_center = planet.semiMinorAxis * sinE;
+
+        //         // Set positioner's position (relative to the inclined container's origin)
+        //          planet.positioner.position.set(
+        //              x_ellipse_center + planet.focusOffset.x, // Offset by focus distance
+        //              0,
+        //              z_ellipse_center + planet.focusOffset.z
+        //         );
+
+        //         // --- Planet Axial Rotation (Simple) ---
+        //         planet.mesh.rotation.y += deltaTime * 0.5; // Arbitrary rotation speed
+
+        //         // --- MODIFIED: Update Gravity Sphere Position ---
+        //         if (planet.gravitySphere) {
+        //             // 1. Get planet's current world position
+        //             planet.mesh.getWorldPosition(planetWorldPos); // Uses the reusable vector
+
+        //             // 2. Set sphere's position to match the planet
+        //             planet.gravitySphere.position.copy(planetWorldPos);
+
+        //             // No direction setting needed for spheres
+        //         }
+        //     });
+        // }
+
+        // --- Handle Window Resize ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+
+            updatePlanetsAndGravityVisuals(deltaTime); // UPDATED function call
+            controls.update();
+
+            // Render scene and labels
+            composer.render(); // Renders scene via post-processing
+            labelRenderer.render(scene, camera); // Renders CSS labels on top
+        }
+
+        // --- Create and Add the Earth-Mars Line ---
+        function createEarthMarsLine() {
+            if (!earthObject || !marsObject) {
+                console.error("Earth or Mars planet data not found during line creation.");
+                return;
+            }
+            infoDiv.textContent = "Creating Earth-Mars line...";
+
+            // Use BufferGeometry for efficient updates
+            const lineGeometry = new THREE.BufferGeometry();
+            // Need 6 values (x,y,z for Earth + x,y,z for Mars)
+            const positions = new Float32Array(6);
+            lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            // Emissive material for the line (will bloom if bloom is enabled)
+            // Using LineBasicMaterial as LineMaterial requires extensions and is more complex
+            const lineMaterial = new THREE.LineBasicMaterial({
+                color: 0x00ff00, // Bright Green
+                linewidth: 2, // Note: linewidth > 1 may not work reliably on all platforms
+                // For a truly emissive LOOK with bloom, the color choice is key.
+                // Basic material doesn't have an 'emissive' property like MeshStandardMaterial.
+                // The bloom pass will pick up the bright green color.
+            });
+
+            earthMarsLine = new THREE.Line(lineGeometry, lineMaterial);
+            earthMarsLine.name = "EarthMarsConnection";
+            earthMarsLine.visible = params.showEarthMarsLine; // Set initial visibility
+            earthMarsLine.frustumCulled = false; // Prevent line disappearing sometimes
+            scene.add(earthMarsLine);
+            infoDiv.textContent = "Earth-Mars line created.";
+        }
+
+        // --- Call the new function after creating planets ---
+        init();
+        createEarthMarsLine(); 
+    </script>
+</body>
+
+</html>
